@@ -1,0 +1,472 @@
+@Constants
+  N_CLOCK_TYPES = 2
+  CLOCK_TYPE_SYNC = 0
+  CLOCK_TYPE_TIME = 1
+
+  N_WAVE_TYPES = 7
+  WAVE_TYPE_SINE = 0
+  WAVE_TYPE_COSINE = 1
+  WAVE_TYPE_SQUARE = 2
+  WAVE_TYPE_TRIANGLE = 3
+  WAVE_TYPE_RAMPUP = 4
+  WAVE_TYPE_RAMPDOWN = 5
+  WAVE_TYPE_SH = 6
+
+  N_PAGES = 3
+  PAGE_PERIOD = 0
+  PAGE_MIDI = 1
+  PAGE_OTHER = 2
+
+  SETTING_PERIOD_CLOCK_TYPE = 0
+  SETTING_PERIOD_BASE = 1
+  SETTING_PERIOD_MULTIPLIER = 2
+  SETTING_PERIOD_DIVISOR = 3
+
+  SETTING_MIDI_CHANNEL = 0
+  SETTING_MIDI_CC = 1
+  SETTING_MIDI_MIN = 2
+  SETTING_MIDI_MAX = 3
+
+  SETTING_OTHER_PHASE_NUMERATOR = 0
+  SETTING_OTHER_PHASE_DENOMINATOR = 1
+  SETTING_OTHER_WAVE_TYPE = 2
+  SETTING_OTHER_MODULATION = 3
+@End
+
+@OnLoad
+  __setup__ = True
+  ShowLayout 2
+  SetShortName {LFOs}
+  LabelPads {LFOs}
+  Call @Constants
+  SetTimerInterval 16
+
+  if Unassigned __initialized__ or Unassigned lfoPeriodClockTypes
+    __initialized__ = True
+    startTime = SystemTime
+    fillArray padDownTimes, 0, 16
+    settingsPage = 0
+    fillArray lfoPeriodClockTypes, 0, 16
+    fillArray lfoPeriodBases, 1, 16
+    fillArray lfoPeriodMultipliers, 1, 16
+    fillArray lfoPeriodDivisors, 1, 16
+    fillArray lfoPeriodValues, 1, 16
+    for _pad = 0 to 15
+      lfoMidiChannels[_pad] = _pad
+    endfor
+    fillArray lfoMidiCCs, 1, 16
+    fillArray lfoMidiMins, 0, 16
+    fillArray lfoMidiMaxes, 127, 16
+    fillArray lfoOtherPhaseNumerators, 0, 16
+    fillArray lfoOtherPhaseDenominators, 16, 16
+    fillArray lfoOtherWaveTypes, 0, 16
+    fillArray lfoOtherModulations, -1, 16
+  endif
+
+  for activeLfo = 0 to 15
+    Call @UpdateActiveLfoPadLabel
+    Call @UpdateActiveLfo
+  endfor
+  activeLfo = -1
+  lfoToReset = -1
+  fillArray padEdited, NO, 16
+  fillArray lastCCSent, -1, 16
+
+  Call @UpdateKnobValues
+  Call @UpdateKnobLabels
+
+  __setup__ = False
+  StartTimer
+@End
+
+@OnHostStart
+  Call @ResetAllLfos
+@End
+
+@OnShiftDown
+  settingsPage = (settingsPage + 1) % N_PAGES
+  Call @UpdateKnobValues
+  Call @UpdateKnobLabels
+@End
+
+@OnPadDown
+  _alreadyActiveLfo = activeLfo
+  if _alreadyActiveLfo >= 0
+    // Copy a held pad to a tapped pad.
+    lfoPeriodClockTypes[LastPad] = lfoPeriodClockTypes[activeLfo]
+    lfoPeriodBases[LastPad] = lfoPeriodBases[activeLfo]
+    lfoPeriodMultipliers[LastPad] = lfoPeriodMultipliers[activeLfo]
+    lfoPeriodDivisors[LastPad] = lfoPeriodDivisors[activeLfo]
+    lfoPeriodValues[LastPad] = lfoPeriodValues[activeLfo]
+    // Keep the destination pad’s channel.
+    // lfoMidiChannels[LastPad] = lfoMidiChannels[activeLfo]
+    lfoMidiCCs[LastPad] = lfoMidiCCs[activeLfo]
+    lfoMidiMins[LastPad] = lfoMidiMins[activeLfo]
+    lfoMidiMaxes[LastPad] = lfoMidiMaxes[activeLfo]
+    lfoOtherPhaseNumerators[LastPad] = lfoOtherPhaseNumerators[activeLfo]
+    lfoOtherPhaseDenominators[LastPad] = lfoOtherPhaseDenominators[activeLfo]
+    lfoOtherWaveTypes[LastPad] = lfoOtherWaveTypes[activeLfo]
+    lfoOtherModulations[LastPad] = lfoOtherModulations[activeLfo]
+    padEdited[LastPad] = YES
+    LatchPad LastPad, NO
+  else
+    padDownTimes[LastPad] = SystemTime
+    padEdited[LastPad] = NO
+  endif
+  activeLfo = LastPad
+  Call @UpdateKnobValues
+  Call @UpdateKnobLabels
+  if _alreadyActiveLfo >= 0
+    Call @UpdateActiveLfoPadLabel
+    SetupLFO activeLfo, lfoMidiMins[activeLfo], lfoMidiMaxes[activeLfo], lfoPeriodClockTypes[activeLfo] = CLOCK_TYPE_SYNC , 1 / lfoPeriodValues[activeLfo]
+    activeLfo = _alreadyActiveLfo
+  endif
+@End
+
+@OnPadUp
+  if LastPad = activeLfo
+    activeLfo = -1
+  endif
+  if NOT padEdited[LastPad] AND SystemTime - padDownTimes[LastPad] < 1000
+    lastCCSent[LastPad] = -1
+    if NOT PadState LastPad
+      lfoToReset = LastPad
+      Call @ResetLFO
+    endif
+    LatchPad LastPad, NOT PadState LastPad
+  endif
+
+  Call @UpdateKnobValues
+  Call @UpdateKnobLabels
+@End
+
+@OnKnobChange
+  if activeLfo < 0
+    SetKnobValue LastKnob, 0
+  else
+    padEdited[activeLfo] = YES
+      Call @UpdateActiveLfo
+      Call @UpdateActiveLfoPadLabel
+      Call @UpdateKnobLabels
+  endif
+@End
+
+// When an LFO is reset, we take into account the elapsed time so LFOs are in sync with one-another.
+@ResetLfo
+  if lfoToReset < 0
+    Exit
+  endif
+  _period = lfoPeriodValues[lfoToReset]
+  _elapsedTime = (SystemTime - startTime) / 1000 // In seconds.
+  if lfoPeriodClockTypes[lfoToReset] = CLOCK_TYPE_SYNC
+    // Tempo is measured in beats per minute. LFOs are synced to measures.
+    _elapsedTime = _elapsedTime * HostTempo / 60 / HostBeatsPerMeasure
+  endif
+  // Mozaic only has integer modulo. The formula mod = a - b * floor(a / b) gives fractional modulo.
+  // _periodProgress = (_elapsedTime mod _period) / _period, using the formula above:
+  _periodProgress = (_elapsedTime - _period * RoundDown (_elapsedTime / _period)) / _period
+  _phase = _periodProgress + lfoOtherPhaseNumerators[lfoToReset] / lfoOtherPhaseDenominators[lfoToReset]
+  // _phase = phase mod 1, using the formula above:
+  ResetLFO lfoToReset, _phase - RoundDown _phase
+@End
+
+@ResetAllLfos
+  startTime = SystemTime
+  for lfoToReset = 0 to 15
+    Call @ResetLfo
+  endfor
+@End
+
+@UpdateActiveLfo
+  if activeLfo < 0 or __setup__
+    // Skip.
+  elseif settingsPage = PAGE_PERIOD
+    _base = Round (TranslateScale (GetKnobValue SETTING_PERIOD_BASE), 0, 127, 1, 100)
+    _multiplier = Round (TranslateScale (GetKnobValue SETTING_PERIOD_MULTIPLIER), 0, 127, 1, 1000)
+    _divisor = Round (TranslateScale (GetKnobValue SETTING_PERIOD_DIVISOR), 0, 127, 1, 100)
+    lfoPeriodClockTypes[activeLfo] = Div (GetKnobValue SETTING_PERIOD_CLOCK_TYPE), 64
+    lfoPeriodBases[activeLfo] = _base
+    lfoPeriodMultipliers[activeLfo] = _multiplier
+    lfoPeriodDivisors[activeLfo] = _divisor
+    lfoPeriodValues[activeLfo] = _base * _multiplier / _divisor
+  elseif settingsPage = PAGE_MIDI
+    lfoMidiChannels[activeLfo] = Div (GetKnobValue SETTING_MIDI_CHANNEL), 8
+    lfoMidiCCs[activeLfo] = Round GetKnobValue SETTING_MIDI_CC
+    _min = Round GetKnobValue SETTING_MIDI_MIN
+    _max = Round GetKnobValue SETTING_MIDI_MAX
+    if _min > _max
+      _temp = _min
+      _min = _max
+      _max = _temp
+    endif
+    lfoMidiMins[activeLfo] = _min
+    lfoMidiMaxes[activeLfo] = _max
+  elseif settingsPage = PAGE_OTHER
+    lfoOtherPhaseDenominators[activeLfo] = Round (TranslateScale (GetKnobValue SETTING_OTHER_PHASE_DENOMINATOR), 0, 127, 2, 64)
+    // Keep the numerator stable unless it’s directly edited or exceeds the denominator.
+    if LastKnob = SETTING_OTHER_PHASE_NUMERATOR
+      lfoOtherPhaseNumerators[activeLfo] = Round (TranslateScale (GetKnobValue SETTING_OTHER_PHASE_NUMERATOR), 0, 127, 0, lfoOtherPhaseDenominators[activeLfo] - 1)
+    elseif lfoOtherPhaseNumerators[activeLfo] >= lfoOtherPhaseDenominators[activeLfo]
+      lfoOtherPhaseNumerators[activeLfo] = lfoOtherPhaseDenominators[activeLfo] - 1
+    endif
+    // We don’t use Div below since the denominator isn’t an int, and Div casts both args *before* the division as well as after.
+    lfoOtherWaveTypes[activeLfo] = RoundDown (GetKnobValue SETTING_OTHER_WAVE_TYPE) / 18.143  // > 127 / 7
+    lfoOtherModulations[activeLfo] = Round (TranslateScale (GetKnobValue SETTING_OTHER_MODULATION), 0, 127, -1, 15)
+  endif
+
+  _waveType = lfoOtherWaveTypes[activeLfo]
+  if _waveType = WAVE_TYPE_SINE
+    SetLFOType activeLfo, {Sine}
+  elseif _waveType = WAVE_TYPE_COSINE
+    SetLFOType activeLfo, {Cosine}
+  elseif _waveType = WAVE_TYPE_SQUARE
+    SetLFOType activeLfo, {Square}
+  elseif _waveType = WAVE_TYPE_TRIANGLE
+    SetLFOType activeLfo, {Triangle}
+  elseif _waveType = WAVE_TYPE_RAMPUP
+    SetLFOType activeLfo, {RampUp}
+  elseif _waveType = WAVE_TYPE_RAMPDOWN
+    SetLFOType activeLfo, {RampDown}
+  elseif _waveType = WAVE_TYPE_SH
+    SetLFOType activeLfo, {SH}
+  endif
+  SetupLFO activeLfo, lfoMidiMins[activeLfo], lfoMidiMaxes[activeLfo], lfoPeriodClockTypes[activeLfo] = CLOCK_TYPE_SYNC , 1 / lfoPeriodValues[activeLfo]
+@End
+
+@UpdateActiveLfoPadLabel
+  if activeLfo >= 0
+    _periodClockType = lfoPeriodClockTypes[activeLfo]
+    _modulationChannel = lfoOtherModulations[activeLfo]
+    _waveType = lfoOtherWaveTypes[activeLfo]
+    if _modulationChannel < 0
+      if _periodClockType = CLOCK_TYPE_SYNC
+        if _waveType = WAVE_TYPE_SINE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], { bars}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Sine}, {            }
+        elseif _waveType = WAVE_TYPE_COSINE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], { bars}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Cosine}, {            }
+        elseif _waveType = WAVE_TYPE_SQUARE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], { bars}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Square}, {            }
+        elseif _waveType = WAVE_TYPE_TRIANGLE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], { bars}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Triangle}, {            }
+        elseif _waveType = WAVE_TYPE_RAMPUP
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], { bars}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Ramp Up}, {            }
+        elseif _waveType = WAVE_TYPE_RAMPDOWN
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], { bars}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Ramp Down}, {            }
+        elseif _waveType = WAVE_TYPE_SH
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], { bars}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {S & H}, {            }
+        endif
+      elseif _periodClockType = CLOCK_TYPE_TIME
+        if _waveType = WAVE_TYPE_SINE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], {s}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Sine}, {            }
+        elseif _waveType = WAVE_TYPE_COSINE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], {s}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Cosine}, {            }
+        elseif _waveType = WAVE_TYPE_SQUARE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], {s}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Square}, {            }
+        elseif _waveType = WAVE_TYPE_TRIANGLE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], {s}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Triangle}, {            }
+        elseif _waveType = WAVE_TYPE_RAMPUP
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], {s}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Ramp Up}, {            }
+        elseif _waveType = WAVE_TYPE_RAMPDOWN
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], {s}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Ramp Down}, {            }
+        elseif _waveType = WAVE_TYPE_SH
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], {s}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {S & H}, {            }
+        endif
+      endif
+    else
+      if _periodClockType = CLOCK_TYPE_SYNC
+        if _waveType = WAVE_TYPE_SINE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], { bars}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], { ~}, lfoOtherModulations[activeLfo] + 1, {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Sine}, {            }
+        elseif _waveType = WAVE_TYPE_COSINE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], { bars}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], { ~}, lfoOtherModulations[activeLfo] + 1, {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Cosine}, {            }
+        elseif _waveType = WAVE_TYPE_SQUARE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], { bars}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], { ~}, lfoOtherModulations[activeLfo] + 1, {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Square}, {            }
+        elseif _waveType = WAVE_TYPE_TRIANGLE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], { bars}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], { ~}, lfoOtherModulations[activeLfo] + 1, {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Triangle}, {            }
+        elseif _waveType = WAVE_TYPE_RAMPUP
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], { bars}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], { ~}, lfoOtherModulations[activeLfo] + 1, {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Ramp Up}, {            }
+        elseif _waveType = WAVE_TYPE_RAMPDOWN
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], { bars}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], { ~}, lfoOtherModulations[activeLfo] + 1, {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Ramp Down}, {            }
+        elseif _waveType = WAVE_TYPE_SH
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], { bars}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], { ~}, lfoOtherModulations[activeLfo] + 1, {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {S & H}, {            }
+        endif
+      elseif _periodClockType = CLOCK_TYPE_TIME
+        if _waveType = WAVE_TYPE_SINE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], {s}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], { ~}, lfoOtherModulations[activeLfo] + 1, {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Sine}, {            }
+        elseif _waveType = WAVE_TYPE_COSINE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], {s}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], { ~}, lfoOtherModulations[activeLfo] + 1, {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Cosine}, {            }
+        elseif _waveType = WAVE_TYPE_SQUARE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], {s}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], { ~}, lfoOtherModulations[activeLfo] + 1, {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Square}, {            }
+        elseif _waveType = WAVE_TYPE_TRIANGLE
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], {s}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], { ~}, lfoOtherModulations[activeLfo] + 1, {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Triangle}, {            }
+        elseif _waveType = WAVE_TYPE_RAMPUP
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], {s}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], { ~}, lfoOtherModulations[activeLfo] + 1, {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Ramp Up}, {            }
+        elseif _waveType = WAVE_TYPE_RAMPDOWN
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], {s}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], { ~}, lfoOtherModulations[activeLfo] + 1, {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {Ramp Down}, {            }
+        elseif _waveType = WAVE_TYPE_SH
+          LabelPad activeLfo, lfoPeriodValues[activeLfo], {s}, {            }, {+}, lfoOtherPhaseNumerators[activeLfo], {/}, lfoOtherPhaseDenominators[activeLfo], { ~}, lfoOtherModulations[activeLfo] + 1, {            }, {Ch.}, lfoMidiChannels[activeLfo] + 1, { #}, lfoMidiCCs[activeLfo], {            }, lfoMidiMins[activeLfo], { - }, lfoMidiMaxes[activeLfo], {            }, {S & H}, {            }
+        endif
+      endif
+    endif
+  endif
+@End
+
+@UpdateKnobValues
+  if activeLfo < 0
+    for _knob = 0 to 3
+      SetKnobValue _knob, 0
+    endfor
+  elseif settingsPage = PAGE_PERIOD
+    _clockType = lfoPeriodClockTypes[activeLfo]
+    SetKnobValue SETTING_PERIOD_CLOCK_TYPE, Div (_clockType + 0.5) * 128, N_CLOCK_TYPES
+    SetKnobValue SETTING_PERIOD_BASE, (TranslateScale lfoPeriodBases[activeLfo], 1, 100, 0, 127)
+    SetKnobValue SETTING_PERIOD_MULTIPLIER, (TranslateScale lfoPeriodMultipliers[activeLfo], 1, 1000, 0, 127)
+    SetKnobValue SETTING_PERIOD_DIVISOR, (TranslateScale lfoPeriodDivisors[activeLfo], 1, 100, 0, 127)
+  elseif settingsPage = PAGE_MIDI
+    SetKnobValue SETTING_MIDI_CHANNEL, Div (lfoMidiChannels[activeLfo] + 0.5) * 128, 16
+    SetKnobValue SETTING_MIDI_CC, lfoMidiCCs[activeLfo]
+    SetKnobValue SETTING_MIDI_MIN, lfoMidiMins[activeLfo]
+    SetKnobValue SETTING_MIDI_MAX, lfoMidiMaxes[activeLfo]
+  elseif settingsPage = PAGE_OTHER
+    SetKnobValue SETTING_OTHER_PHASE_NUMERATOR, Div (lfoOtherPhaseNumerators[activeLfo] + 0.5) * 128, lfoOtherPhaseDenominators[activeLfo]
+    SetKnobValue SETTING_OTHER_PHASE_DENOMINATOR, (TranslateScale lfoOtherPhaseDenominators[activeLfo], 2, 64, 0, 127)
+    SetKnobValue SETTING_OTHER_WAVE_TYPE, Div (lfoOtherWaveTypes[activeLfo] + 0.5) * 128, N_WAVE_TYPES
+    SetKnobValue SETTING_OTHER_MODULATION, (TranslateScale lfoOtherModulations[activeLfo], -1, 15, 0, 127)
+  endif
+@End
+
+@UpdateKnobLabels
+  if activeLfo < 0
+    if settingsPage = PAGE_PERIOD
+      LabelKnobs {⚙️ Period (hold a pad)}
+      LabelKnob SETTING_PERIOD_CLOCK_TYPE, {Clock mode}
+      LabelKnob SETTING_PERIOD_BASE, {Base period}
+      LabelKnob SETTING_PERIOD_MULTIPLIER, {Multiplier}
+      LabelKnob SETTING_PERIOD_DIVISOR, {Divisor}
+    elseif settingsPage = PAGE_MIDI
+      LabelKnobs {⚙️ MIDI (hold a pad)}
+      LabelKnob SETTING_MIDI_CHANNEL, {Channel}
+      LabelKnob SETTING_MIDI_CC, {CC#}
+      LabelKnob SETTING_MIDI_MIN, {Min}
+      LabelKnob SETTING_MIDI_MAX, {Max}
+    elseif settingsPage = PAGE_OTHER
+      LabelKnobs {⚙️ Other (hold a pad)}
+      LabelKnob SETTING_OTHER_PHASE_NUMERATOR, {Phase}
+      LabelKnob SETTING_OTHER_PHASE_DENOMINATOR, {Divisor}
+      LabelKnob SETTING_OTHER_WAVE_TYPE, {LFO Type}
+      LabelKnob SETTING_OTHER_MODULATION, {Modulator}
+    endif
+  elseif settingsPage = PAGE_PERIOD
+    LabelKnobs {⚙️ Period}
+    _clockType = lfoPeriodClockTypes[activeLfo]
+    _base = lfoPeriodBases[activeLfo]
+    _multiplier = lfoPeriodMultipliers[activeLfo]
+    _divisor = lfoPeriodDivisors[activeLfo]
+    if _clockType = CLOCK_TYPE_SYNC
+      LabelKnob SETTING_PERIOD_CLOCK_TYPE, {Sync}
+      LabelKnob SETTING_PERIOD_BASE, _base, { bars}
+    elseif _clockType = CLOCK_TYPE_TIME
+      LabelKnob SETTING_PERIOD_CLOCK_TYPE, {Time}
+      LabelKnob SETTING_PERIOD_BASE, _base, {s}
+    endif
+    LabelKnob SETTING_PERIOD_MULTIPLIER, {x }, _multiplier
+    LabelKnob SETTING_PERIOD_DIVISOR, {/ }, _divisor
+  elseif settingsPage = PAGE_MIDI
+    LabelKnobs {⚙️ MIDI}
+    LabelKnob SETTING_MIDI_CHANNEL, {Channel }, lfoMidiChannels[activeLfo] + 1
+    LabelKnob SETTING_MIDI_CC, {CC }, lfoMidiCCs[activeLfo]
+    LabelKnob SETTING_MIDI_MIN, {Min }, lfoMidiMins[activeLfo]
+    LabelKnob SETTING_MIDI_MAX, {Max }, lfoMidiMaxes[activeLfo]
+  elseif settingsPage = PAGE_OTHER
+    LabelKnobs {⚙️ Other}
+    LabelKnob SETTING_OTHER_PHASE_NUMERATOR, lfoOtherPhaseNumerators[activeLfo]
+    LabelKnob SETTING_OTHER_PHASE_DENOMINATOR, lfoOtherPhaseDenominators[activeLfo]
+    _waveType = lfoOtherWaveTypes[activeLfo]
+    if _waveType = 0
+      LabelKnob SETTING_OTHER_WAVE_TYPE, {Sine}
+    elseif _waveType = 1
+      LabelKnob SETTING_OTHER_WAVE_TYPE, {Cosine}
+    elseif _waveType = 2
+      LabelKnob SETTING_OTHER_WAVE_TYPE, {Square}
+    elseif _waveType = 3
+      LabelKnob SETTING_OTHER_WAVE_TYPE, {Triangle}
+    elseif _waveType = 4
+      LabelKnob SETTING_OTHER_WAVE_TYPE, {Ramp Up}
+    elseif _waveType = 5
+      LabelKnob SETTING_OTHER_WAVE_TYPE, {RampDown}
+    elseif _waveType = 6
+      LabelKnob SETTING_OTHER_WAVE_TYPE, {S & H}
+    endif
+    _modulationChannel = lfoOtherModulations[activeLfo]
+    if _modulationChannel >= 0
+      LabelKnob SETTING_OTHER_MODULATION, {Pad }, _modulationChannel + 1
+    else
+      LabelKnob SETTING_OTHER_MODULATION, {None}
+    endif
+  endif
+@End
+
+@OnTimer
+  for _lfo = 0 to 15
+    if PadState _lfo
+      value = GetLFOValue _lfo
+      _modulationChannel = lfoOtherModulations[_lfo]
+      if _modulationChannel >= 0
+        value = (value * GetLFOValue _modulationChannel) / 127
+      endif
+      value = Round value
+      if value <> lastCCSent[_lfo]
+        SendMIDICC lfoMidiChannels[_lfo], lfoMidiCCs[_lfo], value
+        lastCCSent[_lfo] = value
+      endif
+    endif
+  endfor
+@End
+
+@Description
+∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿ LFOs by Orchid, v3.1.1 ∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿
+
+Set and toggle 16 independent LFOs. You can cross-modulate them if you want, but by default it’s just a bunch of LFOs.
+
+Each LFO is assigned to a pad in the UI. To toggle an LFO’s MIDI CC output on or off, click its pad. To adjust an LFO’s settings, hold its pad down and adjust the knobs on the right. To copy a pad’s settings to another pad, hold the source pad then tap the destination pad. Everything but the destination pad’s channel will be overwritten.
+
+There are three settings pages; access them by tapping SHIFT.
+
+When setting an unsynced period, each LFO can have a max frequency of 100Hz, and a max period of one hundred thousand seconds (about 1.5 days). You can extend both of these limits by setting “Clock mode” to sync, and adjusting your AU host’s tempo. You can also modulate an LFO with another pad’s output using the modulator knob in the “Other” settings panel.
+
+Adjusting an active LFO’s phase will not take immediate effect; this prevents sudden jumps in value. To sync an LFO with the rest after changing its phase, toggle it off then back on.
+
+Feel free to leave questions, comments, and bug reports at patchstorage.com/lfos. You can find more of my work at rileyjshaw.com.
+
+Version history:
+• v3.1.1: Modulation fixes from the legendary @ki. Thanks!
+• v3.1.0: Don’t toggle pads that are held for over 1 second.
+• v3.0.0:
+  • Add copy function.
+  • Add separate phase numerator and denominator controls.
+  • Remove second modulation source.
+• v2.1.0: Add phase parameter.
+• v2.0.0:
+  • Control period instead of frequency.
+  • Only send CC messages when they change.
+• v1.1.0: Add inter-channel modulation.
+• v1.0.0: Initial release.
+@End
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
