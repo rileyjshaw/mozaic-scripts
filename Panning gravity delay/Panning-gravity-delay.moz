@@ -1,0 +1,332 @@
+@OnLoad
+  SetShortName {🍳}
+
+  // Constants and defaults.
+  ACTIVE_TOGGLE = 0
+  SEND_VELOCITY_TOGGLE = 1
+  REVERSE_TOGGLE = 2
+  MIRROR_TOGGLE = 3
+
+  GRAVITY_KNOB = 0
+  FRICTION_KNOB = 1
+  CC_START_KNOB = 2
+  CC_END_KNOB = 3
+  N_CHANNELS_KNOB = 9
+  MAX_BOUNCES_KNOB = 4
+  RAND_KNOB_OFFSET = 5
+
+  defaultToggleStates = [YES, YES, NO, NO]
+  defaultKnobStates = [16, 28, 0, 0, 127, 33, 22, 127, 127, 60]
+
+  // Global state.
+  if Unassigned toggleStates
+    CopyArray defaultToggleStates, toggleStates, 4
+    CopyArray defaultKnobStates, knobStates, 10
+    ccPerChannel = NO
+  endif
+
+  FillArray panStartTimes, 0, 16
+  FillArray panEndTimes, 0, 16
+  FillArray panFactors, 0, 16
+  FillArray panCCs, 0, 16
+  FillArray panInitialCCValues, 0, 16
+  FillArray panCCValueDeltas, 0, 16
+  FillArray panCCLatestValue, -1, 16
+
+  // Layout and UI.
+  ShowLayout 0
+  SetXYValues 0, 0
+  for knobIdx = 0 to 9
+    LabelKnob knobIdx, { }
+  endfor
+  LabelKnob GRAVITY_KNOB, {Gravity}
+  LabelKnob FRICTION_KNOB, {Friction}
+  LabelKnob CC_START_KNOB, {CC start}
+  LabelKnob CC_END_KNOB, {CC end}
+  LabelKnob MAX_BOUNCES_KNOB, {🔝bounces}
+  LabelKnob N_CHANNELS_KNOB, {# channels}
+  for knobIdx = GRAVITY_KNOB to CC_END_KNOB
+    LabelKnob knobIdx + RAND_KNOB_OFFSET, {+ random}
+  endfor
+  LabelXY { }
+  Call @InitSettings
+
+  // Start polling for pan CC messages and to free unused channels.
+  SetTimerInterval 8
+  StartTimer
+@End
+
+@InitSettings
+  Call @SetTitle
+  Call @InitToggles
+  Call @InitKnobs
+@End
+
+@SetTitle
+  if ccPerChannel
+    LabelKnobs {Panning gravity delay (pan on CC46 - 61)}
+  else
+    LabelKnobs {Panning gravity delay (pan on CC10)}
+  endif
+@End
+
+@OnShiftDown
+  ccPerChannel = NOT ccPerChannel
+  Call @SetTitle
+@End
+
+@InitToggles
+  LabelPads {Toggles}
+  LabelPad ACTIVE_TOGGLE, {Active}
+  LabelPad SEND_VELOCITY_TOGGLE, {Send note velocity}
+  LabelPad REVERSE_TOGGLE, {Reverse   bounce}
+  LabelPad MIRROR_TOGGLE, {Mirror    bounce}
+  for pad = 0 to 3
+    LatchPad pad, toggleStates[pad]
+  endfor
+@End
+
+@InitKnobs
+  for knobIdx = 0 to 9
+    SetKnobValue knobIdx, knobStates[knobIdx]
+  endfor
+  Call @UpdateKnobLabels
+@End
+
+@OnPadDown
+  newState = NOT (PadState LastPad)
+  LatchPad LastPad, newState
+  toggleStates[LastPad] = newState
+@End
+
+@OnKnobChange
+  knobStates[LastKnob] = GetKnobValue LastKnob
+  Call @UpdateKnobLabels
+@End
+
+@UpdateKnobLabels
+  LabelKnob N_CHANNELS_KNOB, (1 + Div knobStates[N_CHANNELS_KNOB], 8), { channels}
+@End
+
+@OnMidiNoteOn
+  if toggleStates[ACTIVE_TOGGLE]
+    _channelIdxPreOffset = 0
+    _channelIdxMax = Div knobStates[N_CHANNELS_KNOB], 8
+    _channelIdxBound = _channelIdxMax + 1
+    _channelIdxOffset = Random 0, _channelIdxMax
+    channelIdx = -1
+    while (channelIdx = -1) AND (_channelIdxPreOffset < _channelIdxBound)
+      _channelIdx = (_channelIdxPreOffset + _channelIdxOffset) % _channelIdxBound
+      if NOT panEndTimes[_channelIdx]
+        channelIdx = _channelIdx
+        panEndTimes[channelIdx] = SystemTime + 8192 // Reserve this index for about 10s.
+      else
+        Inc _channelIdxPreOffset
+      endif
+    endwhile
+
+    if NOT (channelIdx = -1)
+      sendVelocity = toggleStates[SEND_VELOCITY_TOGGLE]
+      reverseOutput = toggleStates[REVERSE_TOGGLE]
+      mirrorOutput = toggleStates[MIRROR_TOGGLE]
+      ccStart = Round (knobStates[CC_START_KNOB] + (Random 0, knobStates[CC_START_KNOB + RAND_KNOB_OFFSET]))
+      ccEnd = Round (knobStates[CC_END_KNOB] + (Random 0, knobStates[CC_END_KNOB + RAND_KNOB_OFFSET]))
+      ccDelta = ccEnd - ccStart
+      maxBounces = knobStates[MAX_BOUNCES_KNOB]
+
+      if ccPerChannel
+        panCC = 46 + channelIdx
+      else
+        panCC = 10
+      endif
+
+      SendMIDICC channelIdx, panCC, ccStart
+      panCCLatestValue[channelIdx] = ccStart
+      SendMIDIThruOnCh channelIdx
+      panCCs[channelIdx] = panCC
+      panInitialCCValues[channelIdx] = ccStart
+      panCCValueDeltas[channelIdx] = ccDelta
+
+      if mirrorOutput
+        maxBounces = maxBounces / 2
+      endif
+
+      _grav = knobStates[GRAVITY_KNOB]
+      _gravRand = Random 0, knobStates[GRAVITY_KNOB + RAND_KNOB_OFFSET]
+      g = (_grav + _gravRand + 1) / 100
+      _fric = knobStates[FRICTION_KNOB]
+      _fricRand = Random 0, knobStates[FRICTION_KNOB + RAND_KNOB_OFFSET]
+      f = 1 + (_fric + _fricRand) / 4
+
+      // Computed values.
+      v = MIDIVelocity - f
+      t = v / g // Really 2 * v / g since the ball goes up then down, but that’s factored into g.
+
+      // Bounce state.
+      nBounces = 0
+      bounceTimes = []
+      bounceVelocities = []
+
+      // Calculate the bounce times and velocities.
+      while (v > 0) AND (nBounces < maxBounces)
+        // Add the bounce to the output list.
+        bounceTimes[nBounces] = t
+        if sendVelocity
+          bounceVelocities[nBounces] = v
+        endif
+        Inc nBounces
+
+        // Update computed values.
+        t = t + v / g
+        v = v - f
+      endwhile
+
+      // Output MIDI.
+      start = 0
+      end = nBounces - 1
+      tFinal = bounceTimes[end]
+      vOut = MIDIVelocity
+
+      if mirrorOutput
+        panFinal = tFinal * 2
+      else
+        panFinal = tFinal
+      endif
+      panFactors[channelIdx] = ccDelta / panFinal
+      panStartTimes[channelIdx] = SystemTime
+      panEndTimes[channelIdx] = panFinal + SystemTime
+
+      for bounce = start to end
+        if sendVelocity
+          vOut = bounceVelocities[bounce]
+        endif
+        tOut = bounceTimes[bounce]
+        if reverseOutput
+          tOut = tFinal - tOut
+        endif
+        SendMIDINoteOn channelIdx, MIDINote, vOut, tOut
+      endfor
+
+      if mirrorOutput
+        if reverseOutput
+          start = start + 1
+        else
+          end = end - 1
+        endif
+        for bounce = 0 to end
+          if sendVelocity
+            vOut = bounceVelocities[bounce]
+          endif
+          tOut = bounceTimes[bounce]
+          if reverseOutput
+            tOut = tFinal + tOut
+          else
+            tOut = tFinal * 2 - tOut
+          endif
+          SendMIDINoteOn channelIdx, MIDINote, vOut, tOut
+        endfor
+      endif
+    endif
+  else
+    SendMIDIThru
+  endif
+@End
+
+@OnTimer
+  for c = 0 to 15
+    end = panEndTimes[c]
+    if end
+      if end < SystemTime
+        panEndTimes[c] = 0
+        SendMIDICC c, panCCs[c], panInitialCCValues[c] + panCCValueDeltas[c]
+        panCCLatestValue[c] = -1
+      else
+        outputCC = Round (panInitialCCValues[c] + (SystemTime - panStartTimes[c]) * panFactors[c])
+        if panCCLatestValue[c] <> outputCC
+          SendMIDICC channelIdx, panCCs[c], outputCC
+          panCCLatestValue[c] = outputCC
+        endif
+      endif
+    endif
+  endfor
+@End
+
+@Description
+🍳 █  █  █ █ █ ██ Panning Gravity Delay by Orchid, v1.0.0 ██ █ █ █  █  █ 🍳
+
+This is a creative MIDI delay that physically models incoming notes based on their velocity, and retriggers them as though they were bouncing with gravity. It also outputs panning data, so notes sound like they’re bouncing from one side of a mix to the other. This effect tends to produce a few distinct echoes before softening into a quiet trill. It can be helpful for breaking out of quantized time or adding organic feeling to a piece.
+
+NOTE: To reduce processor load, this effect only sends MIDI Note On messages. For instruments that expect MIDI Note Off messages, chain this through my "Dedupe" script (patchstorage.com/dedupe).
+
+Unlike my original gravity delay (patchstorage.com/gravity-delay), this effect has a single delay bus. Smooth panning wouldn’t work with multiple delays per note. If you need to simulate a multi-delay bus, you can always add multiple instances of this effect in your host.
+
+Another big difference between this and the original effect is that each note is isolated to its own channel for the entire bounce duration. This ensures one note’s panning data doesn’t interfere with another’s. Notes are assigned to random channels, so you’ll need to monitor the first N channels – N being whatever value you set for N CHANNELS.
+
+By default, panning messages are sent via MIDI CC10 on the note’s corresponding channel. To send a different CC number for each channel instead (CC46 - 61), click the SHIFT button. The current CC mode is always visible in the title.
+
+The delay has 4 additional toggle settings:
+
+• ACTIVE: Enables the delay; bypassed if off.
+• SEND VELOCITY: Sends the physically modelled velocity alongside corresponding notes. If this toggle is off, the initial note velocity is sent with each retrigger.
+• REVERSE: Imagine playing a video of a bouncing ball backwards; the delay starts out quiet and tightly spaced, then grows louder and sparser.
+• MIRROR: Adds a mirror tail to your delay.
+
+Here are their effects visualized:
+
+STANDARD ACTIVE DELAY:      █  █  █ █ █ █████
+w/ VELOCITY:                █  ▇  ▆ ▅ ▄ ▃▂▂▁▁
+w/ REVERSE:                 █████ █ █ █  █  █
+w/ REVERSE+VELOCITY:        ▁▁▂▂▃ ▄ ▅ ▆  ▇  █
+w/ MIRROR:                  █  █  █ █ █ █████████ █ █ █  █  █
+w/ MIRROR+VELOCITY:         █  ▇  ▆ ▅ ▄ ▃▂▂▁▁▁▂▂▃ ▄ ▅ ▆  ▇  █
+w/ MIRROR+REVERSE:          █████ █ █ █  █  █  █  █ █ █ █████
+w/ MIRROR+REVERSE+VELOCITY: ▁▁▂▂▃ ▄ ▅ ▆  ▇  █  ▇  ▆ ▅ ▄ ▃▂▂▁▁
+
+There are also a few knob settings:
+
+• GRAVITY: Acceleration due to gravity in the physical model. Lower values cause longer gaps between bounces.
+• FRICTION: How much velocity is lost at each bounce. Lower values cause the delay tail to last longer.
+• CC START: Panning data is sent from MIDI CC 10, on the same MIDI channel as its corresponding note. The CC START value is sent on the initial bounce. It then smoothly transitions to CC END over the note bounce’s duration. If CC START is lower than CC END, it will pan from left to right. Otherwise it will pan from right to left.
+• CC END: See above.
+• 🔝BOUNCES: Caps the number of MIDI Note On messages sent per note in. Use this if CPU is spiking, or if your synth is flooded with incoming notes.
+• +RANDOM: Increases gravity, friction, or CC start/end settings by a random amount per note, up to the selected value. For instance, if FRICTION is set to 7 and its corresponding +RANDOM knob is set to 4, the resulting range will be 7 to 11. To make each new note bounce from a random panning position to a random panning position, set both CC START and CC END to 0 and set their corresponding +RANDOM knobs to 127.
+• N CHANNELS: To ensure one note’s panning doesn’t interfere with another’s, each note is placed on its own channel until completing its final bounce. Incoming notes are placed on available channels randomly. N CHANNELS sets the number of available channels, which in effect sets the effect’s polyphony.
+
+Here are their effects visualized:
+
+LOW GRAVITY:   █     ▇    ▆   ▅  ▄  ▃  ▂ ▂ ▁▁
+HIGH GRAVITY:  █ ▇ ▆▅▄▃▂▁
+LOW FRICTION:  █  █  ▇  ▇  ▆ ▆ ▅ ▅ ▄ ▄ ▃▃▂▂▂▁▁▁▁
+HIGH FRICTION: █ ▅ ▃▂▂▁▁
+
+Feel free to leave questions, comments, and bug reports at patchstorage.com/panning-gravity-delay. You can find more of my work at rileyjshaw.com.
+
+Version history:
+• v1.0.0: Initial release.
+@End
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

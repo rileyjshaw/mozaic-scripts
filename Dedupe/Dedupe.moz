@@ -1,0 +1,154 @@
+@OnLoad
+  KNOB_TYPE = 0
+  KNOB_MULTIPLIER = 1
+  KNOB_NUMERATOR = 2
+  KNOB_DENOMINATOR = 3
+
+  TYPE_NONE = 0
+  TYPE_SYNC = 1
+  TYPE_TIME = 2
+
+  SetShortName {🙅}
+  ShowLayout 4
+  if Unassigned __initialized__
+    __initialized__ = True
+    oldQuarter = QuarterNote
+    for knob = 0 to 3
+      SetKnobValue knob, 0
+    endfor
+  endif
+  Call @SetValues
+  Call @UpdateKnobLabels
+  ResetNoteStates 0
+  FillArray notesOnPerChannel, 0, 16
+  SetTimerInterval 50
+  StartTimer
+@End
+
+@OnKnobChange
+  Call @SetValues
+  Call @UpdateKnobLabels
+@End
+
+@OnNewBeat
+  if QuarterNote <> oldQuarter
+    Call @SetValues
+    oldQuarter = quarterNote
+  endif
+@End
+
+@SetValues
+  type = Div (GetKnobValue KNOB_TYPE), 43
+
+  if type = TYPE_NONE
+    maxNoteLength = 0
+  elseif type = TYPE_SYNC
+    multiplier = 1 + Div (GetKnobValue KNOB_MULTIPLIER), 4
+    numerator = 1 + Div (GetKnobValue KNOB_NUMERATOR), 4
+    denominator = 1 + Div (GetKnobValue KNOB_DENOMINATOR), 4
+    maxNoteLength = QuarterNote * HostBeatsPerMeasure * multiplier * numerator / denominator
+  elseif type = TYPE_TIME
+    multiplier = 1 + Div (99 * GetKnobValue KNOB_MULTIPLIER), 127
+    numerator = 1 + Div (999 * GetKnobValue KNOB_NUMERATOR), 127
+    denominator = Round (GetKnobValue KNOB_DENOMINATOR)
+    maxNoteLength = multiplier * numerator + denominator
+  endif
+@End
+
+@UpdateKnobLabels
+  if type = TYPE_NONE
+    LabelKnobs {Max note length (none)}
+    LabelKnob KNOB_TYPE, {None}
+    for knob = 1 to 3
+      LabelKnob knob, {-}
+    endfor
+  elseif type = TYPE_SYNC
+    LabelKnobs {Max note length (bars)}
+    LabelKnob KNOB_TYPE, {Sync}
+    LabelKnob KNOB_MULTIPLIER, multiplier, { x }, numerator, {/}, denominator
+    LabelKnob KNOB_NUMERATOR, multiplier, { x }, numerator, {/}, denominator
+    LabelKnob KNOB_DENOMINATOR, multiplier, { x }, numerator, {/}, denominator
+  elseif type = TYPE_TIME
+    LabelKnobs {Max note length (millis)}
+    LabelKnob KNOB_TYPE, {Time}
+    LabelKnob KNOB_MULTIPLIER, multiplier, { x}
+    LabelKnob KNOB_NUMERATOR, numerator, {ms}
+    LabelKnob KNOB_DENOMINATOR, {+ }, denominator, {ms}
+  endif
+@End
+
+@OnMidiInput
+  if MIDICommand = 0x90 // Note on.
+    if GetNoteState MIDIChannel, MIDINote
+      SendMIDINoteOff MIDIChannel, MIDINote, 0
+    else
+      Inc notesOnPerChannel[MIDIChannel]
+    endif
+    SendMIDIThru
+    SetNoteState MIDIChannel, MIDINote, SystemTime + maxNoteLength
+  else
+    SendMIDIThru
+    if MIDICommand = 0x80 // Note off.
+      SetNoteState MIDIChannel, MIDINote, 0
+      Dec notesOnPerChannel[_chan]
+    endif
+  endif
+@End
+
+@OnTimer
+  for _chan = 0 to 15
+    _note = 0
+    while (notesOnPerChannel[_chan] > 0) AND (_note < 128)
+      _state = GetNoteState _chan, _note
+      if _state AND (_state <= SystemTime) AND (type <> TYPE_NONE)
+        SendMIDINoteOff _chan, _note, 0
+        SetNoteState _chan, _note, 0
+        Dec notesOnPerChannel[_chan]
+      endif
+      Inc _note
+    endwhile
+  endfor
+@End
+
+@Description
+                                     🎶🎶🎶 🙅 Dedupe v1.0.0 🙅
+
+Dedupe prevents consecutive MIDI Note On messages from occurring on the same note & channel by sending a corresponding Note Off message immediately before any duplicate Note On. Dedupe can be useful for MIDI controllers that only send Note On signals (eg. drum pads), and synths that start to degrade when too many Note Ons are held.
+
+This module has an optional max note length, after which a Note Off message is sent. This can be helpful when piping a controller that only sends Note On messages into a synth that plays held notes indefinitely.
+
+The modes for max note length are as follows:
+
+NONE: Notes are held indefinitely (or until a Note Off signal is received)
+
+SYNC: Max note length syncs to the beat of the host. Knob 1, 2, and 3 set the beat multiplier, numerator, and denominator respectively. The formula calculates the max note length in number of measures. For instance:
+
+ • 1 * 1/1: One measure (i.e. a whole note)
+ • 7 * 6/4: Seven dotted quarter notes
+
+TIME: Set a specific max time in milliseconds. The formula is Knob 1 * Knob 2 + Knob 3. For example:
+
+ • 1 * 1000ms + 0ms = 1 second
+ • 100 * 600ms + 1ms = 1 minute, plus one millisecond
+
+Feel free to leave suggestions, comments, and bug reports on patchstorage.com/dedupe. You can find more of my work at rileyjshaw.com.
+@End
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

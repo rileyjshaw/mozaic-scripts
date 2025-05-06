@@ -1,0 +1,111 @@
+@OnLoad
+  SHIFT_KNOB = 0
+  OVERFLOW_KNOB = 1
+  ShowLayout 4
+  LabelKnobs {Shift MIDI channels by:}
+  for knob = 0 to 23
+    SetKnobValue knob, 0
+    LabelKnob knob, { }
+  endfor
+  if Unassigned shift
+    shift = 0
+    overflow = 1
+  endif
+  Call @UpdateShortName
+  SetKnobValue SHIFT_KNOB, 63.5 + shift * 4.25
+  SetKnobValue OVERFLOW_KNOB, 63.5 * overflow
+  LabelKnob SHIFT_KNOB, shift
+  Call @LabelOverflowKnob
+  prevShift = shift
+  prevOverflow = overflow
+@End
+
+@UpdateShortName
+  if shift
+    if shift > 0
+      SetShortName {chan>>}
+    else
+      SetShortName {<<chan}
+    endif
+  else
+    SetShortName {<chan>}
+  endif
+@End
+
+@LabelOverflowKnob
+  if overflow = 0
+    LabelKnob OVERFLOW_KNOB, {Discard}
+  elseif overflow = 1
+    LabelKnob OVERFLOW_KNOB, {Wrap}
+  else
+    LabelKnob OVERFLOW_KNOB, {Constrain}
+  endif
+@End
+
+@OnKnobChange
+  if LastKnob = SHIFT_KNOB
+    shift = Round (((GetKnobValue SHIFT_KNOB) - 63.5) / 4.25)
+    if shift <> prevShift
+      Call @UpdateShortName
+      if shift > 0
+        LabelKnob SHIFT_KNOB, {+}, shift
+      else
+        LabelKnob SHIFT_KNOB, shift
+      endif
+      prevShift = shift
+    endif
+  elseif LastKnob = OVERFLOW_KNOB
+    overflow = RoundDown ((GetKnobValue OVERFLOW_KNOB) / 42)
+    if overflow <> prevOverflow
+      Call @LabelOverflowKnob
+      prevOverflow = overflow
+    endif
+  endif
+@End
+
+@OnMidiInput
+  if overflow = 0
+    newCh = MIDIChannel + shift
+    if newCh >= 0 AND newCh < 15
+      SendMIDIThruOnCh newCh
+    else
+      FlashUserLed
+    endif
+  elseif overflow = 1
+    SendMIDIThruOnCh (16 + MIDIChannel + shift) % 16
+  else
+    SendMIDIThruOnCh (Clip (MIDIChannel + shift), 0, 15)
+  endif
+@End
+
+@Description
+                              << MIDI Channel Shifter v1.0.0, by orchid >>
+
+Shifts the MIDI Channel of incoming MIDI messages.
+
+Knob 1: Channel shift amount, from -15 to 15
+
+Knob 2: Channel overflow behavior
+ - Discard: messages outside the valid MIDI Channel range (1-16) are ignored.
+ - Wrap: messages outside the valid MIDI Channel range (1-16) are wrapped within the valid range. For instance, a message on Channel 3 with a shift value set to -8 will wrap to Channel 11. Similarly, a message on Channel 14 with a shift value set to +4 will wrap to Channel 2.
+ - Constrain: messages outside the valid MIDI Channel range (1-16) are sent on the nearest valid channel (Channel 1 or 16).
+@End
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

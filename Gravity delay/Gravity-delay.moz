@@ -1,0 +1,311 @@
+@OnLoad
+  SetShortName {🛰}
+
+  // Constants and defaults.
+  ACTIVE_TOGGLE = 0
+  SEND_VELOCITY_TOGGLE = 1
+  REVERSE_TOGGLE = 2
+  MIRROR_TOGGLE = 3
+
+  GRAVITY_KNOB = 0
+  FRICTION_KNOB = 1
+  MAX_BOUNCES_KNOB = 4
+  RAND_KNOB_OFFSET = 5
+
+  defaultToggleStates = [NO, YES, NO, NO]
+  defaultKnobStates = [16, 28, 0, 0, 127, 33, 22, 0, 0, 0]
+
+  // Global state.
+  activePage = 0
+  if Unassigned toggleStates
+    for page = 0 to 3
+      CopyArray defaultToggleStates, toggleStates[page * 4], 4
+      CopyArray defaultKnobStates, knobStates[page * 10], 10
+    endfor
+    toggleStates[0] = YES
+  endif
+
+  // Layout and UI.
+  ShowLayout 0
+  LabelXY {Sandbox}
+  SetXYValues 64, 64
+  for knobIdx = 0 to 9
+    LabelKnob knobIdx, { }
+  endfor
+  LabelKnob GRAVITY_KNOB, {Gravity}
+  LabelKnob FRICTION_KNOB, {Friction}
+  LabelKnob MAX_BOUNCES_KNOB, {🔝bounces}
+  for knobIdx = GRAVITY_KNOB to FRICTION_KNOB
+    LabelKnob knobIdx + RAND_KNOB_OFFSET, {+ random}
+  endfor
+  Call @InitSettings
+@End
+
+@InitSettings
+  Call @InitToggles
+  Call @InitKnobs
+@End
+
+@InitToggles
+  LabelPads {Toggles}
+  LabelPad ACTIVE_TOGGLE, {Active}
+  LabelPad SEND_VELOCITY_TOGGLE, {Send note velocity}
+  LabelPad REVERSE_TOGGLE, {Reverse   bounce}
+  LabelPad MIRROR_TOGGLE, {Mirror    bounce}
+  for pad = 0 to 3
+    LatchPad pad, toggleStates[4 * activePage + pad]
+  endfor
+@End
+
+@InitKnobs
+  LabelKnobs {Gravity delay [bus }, (activePage + 1), {]}
+  for knobIdx = 0 to 9
+    SetKnobValue knobIdx, knobStates[activePage * 10 + knobIdx]
+  endfor
+@End
+
+@OnShiftDown
+  LabelPads {Select delay}
+  for pad = 0 to 3
+    LabelPad pad, {Delay }, pad + 1
+    LatchPad pad, toggleStates[pad * 4 + ACTIVE_TOGGLE]
+  endfor
+  LabelPad activePage, {Delay }, activePage + 1, { ^^^^^^^}
+@End
+
+@OnShiftUp
+  Call @InitSettings
+@End
+
+@OnPadDown
+  if ShiftPressed
+    Call @ChangeActivePage
+  else
+    Call @ChangeToggle
+  endif
+@End
+
+@ChangeActivePage
+  LabelPad activePage, {Delay }, activePage + 1
+  activePage = LastPad
+  LabelPad activePage, {Delay }, activePage + 1, { ^^^^^^^}
+  Call @InitKnobs
+@End
+
+@ChangeToggle
+  newState = NOT (PadState LastPad)
+  LatchPad LastPad, newState
+  toggleStates[activePage * 4 + LastPad] = newState
+@End
+
+@OnKnobChange
+  knobStates[activePage * 10 + LastKnob] = GetKnobValue LastKnob
+@End
+
+@OnMidiNoteOn
+  SendMIDIThru
+  for page = 0 to 3
+    if toggleStates[page * 4 + ACTIVE_TOGGLE]
+      // Page settings.
+      sendVelocity = toggleStates[page * 4 + SEND_VELOCITY_TOGGLE]
+      reverseOutput = toggleStates[page * 4 + REVERSE_TOGGLE]
+      mirrorOutput = toggleStates[page * 4 + MIRROR_TOGGLE]
+      maxBounces = knobStates[page * 10 + MAX_BOUNCES_KNOB]
+      if mirrorOutput
+        maxBounces = maxBounces / 2
+      endif
+
+      _grav = knobStates[page * 10 + GRAVITY_KNOB]
+      _gravRand = Random 0, knobStates[page * 10 + GRAVITY_KNOB + RAND_KNOB_OFFSET]
+      g = (_grav + _gravRand + 1) / 100
+      _fric = knobStates[page * 10 + FRICTION_KNOB]
+      _fricRand = Random 0, knobStates[page * 10 + FRICTION_KNOB + RAND_KNOB_OFFSET]
+      f = 1 + (_fric + _fricRand) / 4
+
+      // Computed values.
+      v = MIDIVelocity - f
+      t = v / g // Really 2 * v / g since the ball goes up then down, but that’s factored into g.
+
+      // Bounce state.
+      nBounces = 0
+      bounceTimes = []
+      bounceVelocities = []
+
+      // Calculate the bounce times and velocities.
+      while (v > 0) AND (nBounces < maxBounces)
+        // Add the bounce to the output list.
+        bounceTimes[nBounces] = t
+        if sendVelocity
+          bounceVelocities[nBounces] = v
+        endif
+        Inc nBounces
+
+        // Update computed values.
+        t = t + v / g
+        v = v - f
+      endwhile
+
+      // Output MIDI.
+      start = 0
+      end = nBounces - 1
+      tFinal = bounceTimes[end]
+      vOut = MIDIVelocity
+      for bounce = start to end
+        if sendVelocity
+          vOut = bounceVelocities[bounce]
+        endif
+        tOut = bounceTimes[bounce]
+        if reverseOutput
+          tOut = tFinal - tOut
+        endif
+        SendMIDINoteOn MIDIChannel, MIDINote, vOut, tOut
+      endfor
+
+      if mirrorOutput
+        if reverseOutput
+          start = start + 1
+        else
+          end = end - 1
+        endif
+        for bounce = 0 to end
+          if sendVelocity
+            vOut = bounceVelocities[bounce]
+          endif
+          tOut = bounceTimes[bounce]
+          if reverseOutput
+            tOut = tFinal + tOut
+          else
+            tOut = tFinal * 2 - tOut
+          endif
+          SendMIDINoteOn MIDIChannel, MIDINote, vOut, tOut
+        endfor
+      endif
+    endif
+  endfor
+@End
+
+// Lots of code just for an easter egg…
+// Since this is itative, the timing won’t be exact. But it should be close,
+// and I’ve thrown in hacks to ensure it gets the number of bounces correct.
+@OnXYChange
+  xyT = SystemTime
+  _xyGravity = knobStates[activePage * 10 + GRAVITY_KNOB]
+  _xyGravityRand = Random 0, knobStates[activePage * 10 + GRAVITY_KNOB + RAND_KNOB_OFFSET]
+  _xyFriction = knobStates[activePage * 10 + FRICTION_KNOB]
+  _xyFrictionRand = Random 0, knobStates[activePage * 10 + FRICTION_KNOB + RAND_KNOB_OFFSET]
+  xyGravity = (_xyGravity + _xyGravityRand + 1) / 100
+  xyFriction = 1 + (_xyFriction + _xyFrictionRand) / 4
+  xyMaxBounces = knobStates[page * 10 + MAX_BOUNCES_KNOB]
+  xyVDisplay = 0
+  xyVBenchmark = GetYValue
+  // Scale UI so that the first bounce goes to the appropriate height.
+  xyScale = (xyVBenchmark - xyFriction) / 2 / xyGravity
+  SetTimerInterval 10
+  StartTimer
+  xyBounces = 0
+@End
+
+@OnTimer
+  x = GetXValue
+  y = GetYValue
+  xyTDelta = (SystemTime - xyT) * 1.5 // 1.5 is fudge to make it line up better w/ reality.
+  xyT = SystemTime
+  xyVDisplayNew = xyVDisplay + xyGravity * xyTDelta // Since t = v/g, v = tg.
+  xyVDisplayAvg = (xyVDisplay + xyVDisplayNew) / 2
+  xyVDisplay = xyVDisplayNew
+  y = y - xyVDisplayAvg * xyTDelta / xyScale
+  if y < 0
+    Inc xyBounces
+    log {Bounce }, xyBounces
+    xyVBenchmark = xyVBenchmark - xyFriction
+    xyVDisplay = -xyVBenchmark
+    if (xyVDisplay < 0) AND (xyBounces < xyMaxBounces)
+      y = y / xyVDisplay * xyVDisplayAvg / xyScale
+    else
+      if (xyBounces = xyMaxBounces)
+        log {(Max bounces reached)}
+      endif
+      y = 0
+      StopTimer
+    endif
+  endif
+  SetXYValues x, y
+@End
+
+@Description
+  █  █  █ █ █ █████  Gravity Delay by Orchid, v1.0.0  █████ █ █ █  █  █
+
+This is a creative MIDI delay that physically models incoming notes based on their velocity, and retriggers them as though they were bouncing with gravity. It tends to produce a few distinct echoes before softening into a quiet trill. It can be helpful for breaking out of quantized time or adding organic feeling to a piece.
+
+NOTE: To reduce processor load, this effect only sends MIDI Note On messages. For instruments that expect MIDI Note Off messages, chain this through my "Dedupe" script (patchstorage.com/dedupe).
+
+Gravity Delay comes with 4 separate delay busses, which can be toggled and combined. Select a different delay bus by holding SHIFT and clicking one of the toggle buttons.
+
+Each delay has 4 toggle settings:
+
+• ACTIVE: Enables this delay; bypassed if off.
+• SEND VELOCITY: Sends the physically modelled velocity alongside corresponding notes. If this toggle is off, the initial note velocity is sent with each retrigger.
+• REVERSE: Imagine playing a video of a bouncing ball backwards; the delay starts out quiet and tightly spaced, then grows louder and sparser.
+• MIRROR: Adds a mirror tail to your delay.
+
+Here are their effects visualized:
+
+STANDARD ACTIVE DELAY:      █  █  █ █ █ █████
+w/ VELOCITY:                █  ▇  ▆ ▅ ▄ ▃▂▂▁▁
+w/ REVERSE:                 █████ █ █ █  █  █
+w/ REVERSE+VELOCITY:        ▁▁▂▂▃ ▄ ▅ ▆  ▇  █
+w/ MIRROR:                  █  █  █ █ █ █████████ █ █ █  █  █
+w/ MIRROR+VELOCITY:         █  ▇  ▆ ▅ ▄ ▃▂▂▁▁▁▂▂▃ ▄ ▅ ▆  ▇  █
+w/ MIRROR+REVERSE:          █████ █ █ █  █  █  █  █ █ █ █████
+w/ MIRROR+REVERSE+VELOCITY: ▁▁▂▂▃ ▄ ▅ ▆  ▇  █  ▇  ▆ ▅ ▄ ▃▂▂▁▁
+
+There are also a few knob settings:
+
+• GRAVITY: Acceleration due to gravity in the physical model. Lower values cause longer gaps between bounces.
+• FRICTION: How much velocity is lost at each bounce. Lower values cause the delay tail to last longer.
+• 🔝BOUNCES: Caps the number of MIDI Note On messages sent per note in. Use this if CPU is spiking, or if your synth is flooded with incoming notes.
+• +RANDOM: Increases gravity or friction settings by a random amount per note, up to the selected value. For instance, if FRICTION is set to 7 and its corresponding +RANDOM knob is set to 4, the resulting range will be from 7 to 11.
+
+Here are their effects visualized:
+
+LOW GRAVITY:   █     ▇    ▆   ▅  ▄  ▃  ▂ ▂ ▁▁
+HIGH GRAVITY:  █ ▇ ▆▅▄▃▂▁
+LOW FRICTION:  █  █  ▇  ▇  ▆ ▆ ▅ ▅ ▄ ▄ ▃▃▂▂▂▁▁▁▁
+HIGH FRICTION: █ ▅ ▃▂▂▁▁
+
+Note: the current delay bus number is indicated in the title. For instance, “Gravity delay [bus 1]” means the visible settings correspond to bus 1. Hold SHIFT to quickly view which delay busses are active. Highlighted busses are active. The bus emphasized with “^^^^^^^” is the currently selected page.
+
+Note 2: Since you’ve read this far… click the XY pad for an easter egg. The timing isn’t perfect, but the number of bounces should accurately match the visible bus settings.
+
+Feel free to leave questions, comments, and bug reports at patchstorage.com/gravity-delay. You can find more of my work at rileyjshaw.com.
+
+Version history:
+• v1.0.0: Initial release.
+@End
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
